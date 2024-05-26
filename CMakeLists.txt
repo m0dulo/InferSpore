@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8 FATAL_ERROR)
-project(oneLLM LANGUAGES CXX CUDA)
+project(InferSpore LANGUAGES CXX CUDA)
 
 find_package(CUDA 10.0 REQUIRED)
 
