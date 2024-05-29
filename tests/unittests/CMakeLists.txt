@@ -6,3 +6,12 @@ target_link_libraries(
     -lcudart
     -lcudadevrt
     embeddingFunctor)
+
+add_executable(paddingoffset
+    test_cal_paddingoffset.cu
+)
+target_link_libraries(
+  paddingoffset PUBLIC
+    -lcudart
+    -lcudadevrt
+    cal_paddingoffset) 
