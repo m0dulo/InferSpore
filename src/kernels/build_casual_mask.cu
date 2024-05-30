@@ -33,7 +33,7 @@ __global__ void BuildCausalMasksConsideringContextPastKV(T* mask,
         // -inf -inf -inf | 1   1  -inf
         // -inf -inf -inf | 1   1    1
         // "|"符号前表示旧的对话序列，符号后表示当前轮的对话序列
-        bool is_one = q < qlen && k < klen && k <= q + (klen - qlen);
+        bool is_one = q < qlen && k < klen && k <= q + (klen - qlen) && k >= klen - qlen;
         mask[offset] = static_cast<T>(is_one);
 
         // 保证遍历完一个bs中所有的空间
