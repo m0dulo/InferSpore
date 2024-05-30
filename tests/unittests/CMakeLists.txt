@@ -15,3 +15,11 @@ target_link_libraries(
     -lcudart
     -lcudadevrt
     cal_paddingoffset) 
+
+add_executable(causalmask
+    test_casual_mask.cu
+)
+target_link_libraries( 
+    -lcudart
+    -lcudadevrt
+    build_casual_mask) 
