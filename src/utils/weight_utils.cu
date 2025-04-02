@@ -140,18 +140,18 @@ public:
 };
 
 
-template<typename T_OUT, typename T_FILE>
-typename std::enable_if<std::is_same<T_OUT, T_FILE>::value, int>::type loadWeightFromBin(T_OUT* ptr, std::vector<size_t> shape, std::string filename)
-{
-    std::vector<T_FILE> host_array = loadWeightFromBinHelper<T_FILE>(shape, filename);
+// template<typename T_OUT, typename T_FILE>
+// typename std::enable_if<std::is_same<T_OUT, T_FILE>::value, int>::type loadWeightFromBin(T_OUT* ptr, std::vector<size_t> shape, std::string filename)
+// {
+//     std::vector<T_FILE> host_array = loadWeightFromBinHelper<T_FILE>(shape, filename);
 
-    if (host_array.empty()) {
-        return 0;
-    }
+//     if (host_array.empty()) {
+//         return 0;
+//     }
 
-    cudaH2Dcpy(ptr, host_array.data(), host_array.size());
-    return 0;
-}
+//     cudaH2Dcpy(ptr, host_array.data(), host_array.size());
+//     return 0;
+// }
 
 
 template struct loadWeightFromBin<float, float, true>;
