@@ -7,7 +7,6 @@ enum class WeightType
     FP32_W,
     FP16_W,
     INT8_W,
-    //INT4_W,
     UNSUPPORTED_W
 };
 
@@ -30,7 +29,7 @@ inline WeightType getWeightType()
 template<typename T>
 struct BaseWeight {
     std::vector<int> shape;
-    T* data;
+    T*   data;
     WeightType type;
-    T* bias;
+    T*   bias;
 };
