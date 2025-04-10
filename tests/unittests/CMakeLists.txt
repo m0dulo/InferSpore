@@ -23,3 +23,12 @@ target_link_libraries(
     -lcudart
     -lcudadevrt
     build_casual_mask) 
+
+add_executable(biasRope
+    test_bias_and_RoPE.cu
+)
+target_link_libraries(  
+  biasRope PUBLIC
+    -lcudart
+    -lcudadevrt
+    qkv_bias_and_rope) 
