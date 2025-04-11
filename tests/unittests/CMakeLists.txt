@@ -50,3 +50,21 @@ target_link_libraries(
     -lcudart
     -lcudadevrt
     linear) 
+
+add_executable(bmm
+    test_bmm.cu
+)
+target_link_libraries( 
+    bmm PUBLIC
+    -lcudart
+    -lcudadevrt
+    linear) 
+
+add_executable(test_repeat_kv
+    test_repeat_kv.cu
+)
+target_link_libraries( 
+    test_repeat_kv PUBLIC
+    -lcudart
+    -lcudadevrt
+    repeat_kv) 

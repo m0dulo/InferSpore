@@ -32,3 +32,8 @@ add_library(concat_kv STATIC concat_past_kv.cu)
 set_property(TARGET concat_kv PROPERTY CUDA_SEPARABLE_COMPILATION   ON)
 set_property(TARGET concat_kv PROPERTY POSITION_INDEPENDENT_CODE  ON)
 set_property(TARGET concat_kv PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
+
+add_library(repeat_kv STATIC repeat_kv.cu)
+set_property(TARGET repeat_kv PROPERTY CUDA_SEPARABLE_COMPILATION   ON)
+set_property(TARGET repeat_kv PROPERTY POSITION_INDEPENDENT_CODE  ON)
+set_property(TARGET repeat_kv PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
