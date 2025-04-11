@@ -31,4 +31,22 @@ target_link_libraries(
   biasRope PUBLIC
     -lcudart
     -lcudadevrt
-    qkv_bias_and_rope) 
+    qkv_bias_and_rope)
+
+add_executable(test_concat_kv
+    test_concat_kv.cu
+)
+target_link_libraries( 
+    test_concat_kv PUBLIC
+    -lcudart
+    -lcudadevrt
+    concat_kv) 
+
+add_executable(testlinear
+    test_linear.cu
+)
+target_link_libraries( 
+    testlinear PUBLIC
+    -lcudart
+    -lcudadevrt
+    linear) 

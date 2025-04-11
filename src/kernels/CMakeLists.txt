@@ -27,3 +27,8 @@ add_library(qkv_bias_and_rope STATIC qkv_bias_and_RoPE.cu)
 set_property(TARGET qkv_bias_and_rope PROPERTY CUDA_SEPARABLE_COMPILATION   ON)
 set_property(TARGET qkv_bias_and_rope PROPERTY POSITION_INDEPENDENT_CODE  ON)
 set_property(TARGET qkv_bias_and_rope PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
+
+add_library(concat_kv STATIC concat_past_kv.cu)
+set_property(TARGET concat_kv PROPERTY CUDA_SEPARABLE_COMPILATION   ON)
+set_property(TARGET concat_kv PROPERTY POSITION_INDEPENDENT_CODE  ON)
+set_property(TARGET concat_kv PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
