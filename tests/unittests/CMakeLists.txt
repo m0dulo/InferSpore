@@ -68,3 +68,12 @@ target_link_libraries(
     -lcudart
     -lcudadevrt
     repeat_kv) 
+
+add_executable(test_mask_softmax
+    test_mask_softmax.cu
+)
+target_link_libraries(  
+    test_mask_softmax PUBLIC
+    -lcudart
+    -lcudadevrt
+    mask_softmax) 
