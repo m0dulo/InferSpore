@@ -15,7 +15,7 @@ __device__ T blockReduceSum(T val){
     int tid = threadIdx.x;
     int wid = tid / 32;
     int laneid = tid % 32;
-    int warpnum = blockDim.x / 32; 
+    int warpnum = (blockDim.x + 31) / 32; // Fixed warp number calculation
     static __shared__ T warpsum[64];
     val = warpReduceSum<T>(val);
     if(laneid == 0){
@@ -32,7 +32,7 @@ template<typename T>
 __global__ void FusedAddBiasResidualRMSNorm(
                                         T* residual,
                                         T* decoder_out,
-                                        const T* bias,
+                                        /*optional*/const T* bias,
                                         const T* scale,
                                         float eps,
                                         int num_tokens,
@@ -43,32 +43,34 @@ __global__ void FusedAddBiasResidualRMSNorm(
     int tid = threadIdx.x;
     Vec_t *rsd, *bia, *s;
     Vec_t tmp;
-    Vec_t* de_out = reinterpret_cast<Vec_t*>(decoder_out);
+    Vec_t* de_out = reinterpret_cast<Vec_t*>(decoder_out + batch_id * hidden_units);
 
     T thread_accm = static_cast<T>(0);
-    rsd = reinterpret_cast<Vec_t*>(residual);
-    if (bias != nullptr){
+    if (residual != nullptr){
+        rsd = reinterpret_cast<Vec_t*>(residual + batch_id * hidden_units);
+    }
+     if (bias != nullptr){
         bia = reinterpret_cast<Vec_t*>(const_cast<T*>(bias));
     }
 
     for(int i = tid; i < hidden_units / vec_size; i += blockDim.x) {
-        int linear_idx = batch_id * (hidden_units / vec_size) + i; 
         if (residual != nullptr) {
-            de_out[linear_idx].x += rsd[linear_idx].x;
-            de_out[linear_idx].y += rsd[linear_idx].y;
-            de_out[linear_idx].z += rsd[linear_idx].z;
-            de_out[linear_idx].w += rsd[linear_idx].w;
+            de_out[i].x += rsd[i].x;
+            de_out[i].y += rsd[i].y;
+            de_out[i].z += rsd[i].z;
+            de_out[i].w += rsd[i].w;
+            // Defect 1: Missing residual update (rsd[i] = de_out[i])
         }
         if (bias != nullptr) {
-            de_out[linear_idx].x += bia[i].x;
-            de_out[linear_idx].y += bia[i].y;
-            de_out[linear_idx].z += bia[i].z;
-            de_out[linear_idx].w += bia[i].w;
+            de_out[i].x += bia[i].x;
+            de_out[i].y += bia[i].y;
+            de_out[i].z += bia[i].z;
+            de_out[i].w += bia[i].w;
         }
-        thread_accm += de_out[linear_idx].x * de_out[linear_idx].x;
-        thread_accm += de_out[linear_idx].y * de_out[linear_idx].y;
-        thread_accm += de_out[linear_idx].z * de_out[linear_idx].z;
-        thread_accm += de_out[linear_idx].w * de_out[linear_idx].w;
+        thread_accm += de_out[i].x * de_out[i].x;
+        thread_accm += de_out[i].y * de_out[i].y;
+        thread_accm += de_out[i].z * de_out[i].z;
+        thread_accm += de_out[i].w * de_out[i].w;
     }
 
     T blocksum = blockReduceSum<T>(thread_accm);
@@ -82,11 +84,10 @@ __global__ void FusedAddBiasResidualRMSNorm(
         s = reinterpret_cast<Vec_t*>(const_cast<T*>(scale));
     }
     for(int i = tid; i < hidden_units / vec_size; i += blockDim.x) {
-        int linear_idx = batch_id * (hidden_units / vec_size) + i; 
-        de_out[linear_idx].x = s[i].x * de_out[linear_idx].x * inv_fenmu;
-        de_out[linear_idx].y = s[i].y * de_out[linear_idx].y * inv_fenmu;
-        de_out[linear_idx].z = s[i].z * de_out[linear_idx].z * inv_fenmu;
-        de_out[linear_idx].w = s[i].w * de_out[linear_idx].w * inv_fenmu;
+        de_out[i].x = s[i].x * de_out[i].x * inv_fenmu;
+        de_out[i].y = s[i].y * de_out[i].y * inv_fenmu;
+        de_out[i].z = s[i].z * de_out[i].z * inv_fenmu;
+        de_out[i].w = s[i].w * de_out[i].w * inv_fenmu;
     }
 }
 
@@ -106,32 +107,65 @@ __global__ void FusedAddBiasResidualRMSNorm(
     Vec_t *rsd, *bia, *s;
     Vec_t dout, tmp;
     float thread_accm = 0.0f;
+
+    // Defect 2: Incorrect pointer arithmetic for vectorized access
+    // Accessing like array[index] after casting to Vec_t* assumes byte stride, not Vec_t stride.
+    Vec_t* de_out_vec = reinterpret_cast<Vec_t*>(decoder_out);
+    Vec_t* rsd_vec = reinterpret_cast<Vec_t*>(residual);
+    int row_offset_vec = batch_id * hidden_units / vec_size; // This offset logic is correct
+
     if (residual != nullptr && bias != nullptr){
-        rsd = reinterpret_cast<Vec_t*>(residual);
+         // rsd pointer potentially set but not used correctly below if rsd_vec is used
         bia = reinterpret_cast<Vec_t*>(const_cast<half*>(bias));
     }
+
     for(int i = tid; i < hidden_units / vec_size; i += blockDim.x) {
-        int linear_idx = batch_id * (hidden_units / vec_size) + i; 
-        dout = reinterpret_cast<Vec_t*>(decoder_out)[linear_idx];
-        tmp = __hadd2(__hadd2(dout, rsd[linear_idx]), bia[i]);
-        reinterpret_cast<Vec_t*>(decoder_out)[linear_idx] = tmp;
+        // Defect 2: Reading using incorrect indexing scheme
+        dout = de_out_vec[row_offset_vec + i]; // Incorrect: should use base pointer + offset
+
+        // Using separate pointers (potentially correct if initialized correctly)
+        Vec_t* current_de_out = reinterpret_cast<Vec_t*>(decoder_out + batch_id * hidden_units);
+        Vec_t* current_rsd = reinterpret_cast<Vec_t*>(residual + batch_id * hidden_units);
+
+        // Let's assume bias and scale pointers are correct relative to hidden_units start
+        if(bias) bia = reinterpret_cast<Vec_t*>(const_cast<half*>(bias));
+        if(scale) s = reinterpret_cast<Vec_t*>(const_cast<half*>(scale));
+
+
+        // This section simulates trying to use the incorrectly accessed `dout`
+        // or potentially mixing correct/incorrect pointers
+        tmp = dout; // tmp holds potentially garbage data from wrong read
+        if(residual) tmp = __hadd2(tmp, current_rsd[i]); // Adding correct residual to wrong initial value
+        if(bias) tmp = __hadd2(tmp, bia[i]); // Adding correct bias
+
+        // Defect 2: Writing back using incorrect index or pointer
+        // de_out_vec[row_offset_vec + i] = tmp; // This would write to the wrong place
+
+        // Let's simulate writing to the *correct* place but with corrupted data (tmp)
+        current_de_out[i] = tmp;
+
+
         thread_accm += __half2float(tmp.x) * __half2float(tmp.x) + __half2float(tmp.y) * __half2float(tmp.y);
     }
 
     float blocksum = blockReduceSum<float>(thread_accm);
-    __shared__ Vec_t inv_fenmu;
-    if(tid == 0){
-        inv_fenmu = scalar_cast_vec<Vec_t>(__float2half(rsqrt(blocksum / hidden_units + eps)));
+    __shared__ Vec_t inv_fenmu; // Should be float or scalar half based on usage
+     if(tid == 0){
+        // Using float for intermediate precision
+        float inv_fenmu_float = rsqrt(blocksum / hidden_units + eps);
+        inv_fenmu = scalar_cast_vec<Vec_t>(__float2half(inv_fenmu_float));
     }
-    __syncthreads();
+    __syncthreads(); // Sync needed here
 
-    Vec_t* out = reinterpret_cast<Vec_t*>(decoder_out);
+    Vec_t* out = reinterpret_cast<Vec_t*>(decoder_out + batch_id * hidden_units); // Correct pointer for final output write
     if (scale != nullptr){
-        s = reinterpret_cast<Vec_t*>(const_cast<half*>(scale));
+       s = reinterpret_cast<Vec_t*>(const_cast<half*>(scale));
     }
     for(int i = tid; i < hidden_units / vec_size; i += blockDim.x) {
-         int linear_idx = batch_id * (hidden_units / vec_size) + i; 
-        out[linear_idx] = __hmul2(__hmul2(s[i], out[linear_idx]), inv_fenmu);
+         // Read the value that was just written (potentially corrupted)
+         Vec_t current_val = out[i];
+         // Apply scaling
+         out[i] = __hmul2(__hmul2(s[i], current_val), inv_fenmu); // Final write using correct pointer 'out'
     }
 }
 
@@ -149,13 +183,19 @@ void launchFusedAddBiasResidualRMSNorm(
     T* bias = norm.bias;
     T* gamma = scale;
     int vec_size = Vec<T>::size;
-    int num_threads = (hidden_units / vec_size + 31) / 32 * 32; 
-    num_threads = (num_threads == 0) ? 32 : num_threads; 
-    num_threads = (num_threads > 1024) ? 1024 : num_threads; 
+    // Improved block size calculation, assumes divisibility
+    int num_threads = hidden_units / vec_size > 0 ? hidden_units / vec_size : 1;
+    // Clamp to a max reasonable block size
+    num_threads = num_threads > 1024 ? 1024 : num_threads;
+    // Ensure at least warp size if possible
+    num_threads = num_threads < 32 && hidden_units / vec_size > 0 ? 32 : num_threads;
+
 
     dim3 grid(batch_size);
-    dim3 block(num_threads);
-    FusedAddBiasResidualRMSNorm<T><<<grid, block>>>(residual->data,
+    // Ensure num_threads is at least 1
+    dim3 block(num_threads > 0 ? num_threads : 1);
+
+    FusedAddBiasResidualRMSNorm<T><<<grid, block>>>(residual ? residual->data : nullptr,
                                                decoder_out->data,
                                                bias,
                                                gamma,
