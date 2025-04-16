@@ -1,11 +1,7 @@
 #include <stdio.h>
 #include "src/utils/cuda_debug_utils.cuh"
 #include "src/kernels/fused_addresidual_norm.h"
-//bugs1: 2nd warpreducesum returns 0, because blockDim.x < 32, blockDim.x / 32=0
-//bugs2: output buffer valuse is the same as ones before call, thats because we didn't successfully write into the output address
-//bugs3: output buffer's 1st 32 values are right, the latter is wrong, because when we use vec, the ele nums of a row is hiddenunits/vecsize, we should note the row stride to move the ptr carefully
-//bugs4: not update residual, new residual = input + residual
-//注意: 本节warpreduce的注释见rmsnorm_kernel.cu
+
 template<typename T>
 __device__ T warpReduceSum(T val){
     for(int i = 32 / 2; i > 0; i >>= 1){

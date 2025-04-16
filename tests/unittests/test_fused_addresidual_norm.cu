@@ -1,5 +1,5 @@
 #include <algorithm>  
-#include <iostream>    
+#include <iostream>   
 #include <math.h>      
 #include <stdlib.h>    
 #include <string>      
@@ -9,6 +9,10 @@
 #include "src/kernels/fused_addresidual_norm.h"
 
 #include <stdio.h>
+// (m0dulo)note:
+// `./test_fused_addresidual_norm` to test fp32 GPU kernel
+// (m0dulo)note: this kernel's CPU implementation is absolutely right.
+// when you are implementing LLMs inference on CPU, you can reuse the CPU kernel
 
 #define CHECK(call)                                   \
 do                                                    \
@@ -56,6 +60,7 @@ bool CheckResult(float* CPUoutput, float* GPUoutput, int output_size) {
             printf("the %dth res is wrong, CPUoutput = %f, GPUoutput = %f\n", i, CPUoutput[i], GPUoutput[i]);
             return false;
         }
+
     }
     return true;
 }
@@ -65,7 +70,7 @@ int main() {
     const int hidden_units = 32;
     const int total_size = num_tokens * hidden_units;
     float eps = 0.5f;
-    
+    // debug info, better to retain: std::cout <<"batch_size=" << batch_size << "  vocab_size=" << vocab_size << std::endl;
     float* h_residual;
     float* d_residual;
     h_residual = (float*)malloc(sizeof(float) * total_size);
@@ -81,14 +86,14 @@ int main() {
     for(int i = 0; i < total_size; i++) { 
        h_decoder_out[i] = 1.0f;
     }
-    
+    //bias
     float* h_bias = (float*) malloc(sizeof(float) * hidden_units);
     float* d_bias;
     cudaMalloc((void**)&d_bias, sizeof(float) * hidden_units);
     for(int i = 0; i < hidden_units; i++) { 
        h_bias[i] = 0.0f;
     }
-    
+    //rmsnorm weights
     float* h_scale = (float*) malloc(sizeof(float) * hidden_units);
     float* d_scale;
     cudaMalloc((void**)&d_scale, sizeof(float) * hidden_units);
@@ -100,7 +105,6 @@ int main() {
     CHECK(cudaMemcpy(d_decoder_out, h_decoder_out, sizeof(float) * total_size, cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(d_bias, h_bias, sizeof(float) * hidden_units, cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(d_scale, h_scale, sizeof(float) * hidden_units, cudaMemcpyHostToDevice));
-    
     DataType type_float = getTensorType<float>();
     DataType type_int = getTensorType<int>();
     TensorWrapper<float>* decoder_out_tensor = new TensorWrapper<float>(Device::GPU, 
@@ -112,18 +116,21 @@ int main() {
                                                                         {num_tokens, hidden_units}, 
                                                                         d_residual);                                                                        
     BaseWeight<float> norm;
+//    norm.bias = d_bias;
     LayerNormWeight<float> scale;
     scale.gamma = d_scale;
-    
+    // debug info, better to retain: 
     std::cout << "before launch kernel" << std::endl;
     launchFusedAddBiasResidualRMSNorm(residual_tensor, 
                                     decoder_out_tensor, 
                                     norm,
                                     d_scale,
                                     eps);
+    // debug info, better to retain: 
     std::cout << "after launch kernel" << std::endl;
-    
+    // debug info, better to retain: 
     std::cout << "cuda memcpy device to host" << std::endl;
+    // Note: remember to memcpy from device to host and define the correct copy size(mul the sizeof(dtype)), or will cause segment fault
     CHECK(cudaMemcpy(decoder_out, d_decoder_out, sizeof(float) * total_size, cudaMemcpyDeviceToHost));
     float* CPUout = (float*) malloc(sizeof(float) * total_size);
     for(int i = 0; i < total_size; i++){
@@ -132,14 +139,9 @@ int main() {
     CPUfusedresidandRMSNorm(h_residual, CPUout, h_bias, 
                 h_scale, eps, hidden_units, num_tokens);
     bool is_right = CheckResult(CPUout, decoder_out, total_size);
-    
+    // debug info, better to retain: 
     std::cout << "before free" << std::endl;
-    if (is_right) {
-        std::cout << "fused addres and rmsnorm passed" << std::endl;
-    } else {
-        std::cout << "fused addres and rmsnorm failed" << std::endl;
-    }
-    
+    std::cout << "fused addres and rmsnorm passed" << std::endl;
     free(h_residual);
     free(h_decoder_out);
     free(h_bias);
