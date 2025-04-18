@@ -52,3 +52,8 @@ add_library(fused_addresidual_norm STATIC fused_addresidual_norm.cu)
 set_property(TARGET fused_addresidual_norm PROPERTY CUDA_SEPARABLE_COMPILATION   ON)
 set_property(TARGET fused_addresidual_norm PROPERTY POSITION_INDEPENDENT_CODE  ON)
 set_property(TARGET fused_addresidual_norm PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
+
+add_library(act STATIC act_kernel.cu)
+set_property(TARGET act PROPERTY CUDA_SEPARABLE_COMPILATION   ON)
+set_property(TARGET act PROPERTY POSITION_INDEPENDENT_CODE  ON)
+set_property(TARGET act PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
