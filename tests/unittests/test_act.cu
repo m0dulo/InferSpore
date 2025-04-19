@@ -25,11 +25,13 @@ void CPUSwiGLU(T* input, T* output, int batch_size, int intermedia_size){
 template<typename T>
 bool CheckResult(T* CPUoutput, T* GPUoutput, int output_size) {
     bool correct = true;
+  
+    float tolerance = std::is_same<T, half>::value ? 1e-3 : 1e-5;
     for(int i = 0; i < output_size; i++) {
         float cpu_val = (float)CPUoutput[i];
         float gpu_val = (float)GPUoutput[i];
-        if(fabs(cpu_val - gpu_val) > 1e-5){
-            printf("the %dth res is wrong, CPUoutput = %f, GPUoutput = %f\n", i, cpu_val, gpu_val);
+        if(fabs(cpu_val - gpu_val) > tolerance){
+            printf("the %dth res is wrong (tolerance %f), CPUoutput = %f, GPUoutput = %f\n", i, tolerance, cpu_val, gpu_val);
             correct = false;
         }
     }
@@ -51,11 +53,14 @@ void test_act(int batch_size, int intermedia_size, int input_size , int output_s
     T* d_output;
     h_output = (T*)malloc(sizeof(T) * output_size);
     cudaMalloc((void**)&d_output, sizeof(T) * output_size);
+    
     for(int i = 0; i < input_size; i++) {
-        h_input[i] = static_cast<T>( (i % 10) * 0.1f + 0.1f );
+         h_input[i] = static_cast<T>( (rand() % 100) / 50.0f - 1.0f ); // Random float between -1.0 and 1.0
     }
+
     cudaMemcpy(d_input, h_input, sizeof(T) * input_size, cudaMemcpyHostToDevice);
     DataType type = getTensorType<T>();
+   
     TensorWrapper<T>* input_tensor = new TensorWrapper<T>(Device::GPU, type, {batch_size, 2, intermedia_size}, d_input);
     TensorWrapper<T>* output_tensor = new TensorWrapper<T>(Device::GPU, type, {batch_size, intermedia_size}, d_output);
     launchAct(input_tensor, output_tensor);
@@ -64,7 +69,7 @@ void test_act(int batch_size, int intermedia_size, int input_size , int output_s
     T* CPU_output = (T*)malloc(sizeof(T) * output_size);
     CPUSwiGLU(h_input, CPU_output, batch_size, intermedia_size);
     bool is_true = CheckResult(CPU_output, h_output, output_size);
-    if(is_true){
+     if(is_true){
         printf("test passed for type %s\n", (type == DataType::FP32 ? "FP32" : "FP16"));
     } else {
         printf("test failed for type %s\n", (type == DataType::FP32 ? "FP32" : "FP16"));
@@ -80,6 +85,7 @@ void test_act(int batch_size, int intermedia_size, int input_size , int output_s
 }
 
 int main(int argc, char** argv) {
+    srand(1234); // Seed for reproducible random numbers
     constexpr int batch_size = 16;
     constexpr int intermedia_size = 11008;
     constexpr int input_size = batch_size * intermedia_size * 2;
