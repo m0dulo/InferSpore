@@ -14,7 +14,7 @@ struct topK
     __device__ void init(){
         for (int i = 0; i < K; i++) {
             id[i] = -1;
-            val[i] = 0.0;
+            val[i] = -1e-20;
         }
     }
 
@@ -24,7 +24,6 @@ struct topK
             id[K-1] = data_id;
             val[K-1] = data;
         }
-
         for (int i = K - 2; i >= 0; i--){
             if(val[i + 1] > val[i] || id[i] == -1) {
                 T tmp = val[i];

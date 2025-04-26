@@ -39,8 +39,8 @@ __global__ void topK_kernel_round1(const T* probs, const int vocab_size,
 
     if(tid == 0){
         for(int k_offset = 0; k_offset < K; k_offset++) {
-            topK_vals[row_id * BlockPerBeam * K + block_lane * K + k_offset] = block_topK.val[k_offset];
-            topK_ids[row_id * BlockPerBeam * K  + block_lane * K + k_offset] = block_topK.id[k_offset];
+            topK_vals[row_id * vocab_size + block_lane * blockSize + k_offset] = block_topK.val[k_offset];
+            topK_ids[row_id * vocab_size + block_lane * K + k_offset] = block_topK.id[k_offset];
         }
     }
 }
@@ -61,7 +61,7 @@ __global__ void topK_kernel_round2(const int* topK_ids, const T* topK_vals,
 
     for(int i = tid; i < BlockPerBeam * K; i += blockDim.x) {
         int data_offset = bid * BlockPerBeam * K + i;
-        thread_topK.insertHeap(topK_vals[data_offset], topK_ids[data_offset]);
+        thread_topK.insertHeap(topK_vals[data_offset], topK_ids[i]);
     }
 
     topK<T, K> block_topK = blockreduce(temp_storage).Reduce(thread_topK, reduce_functor<T, K>);
@@ -90,12 +90,12 @@ void launchTopKforBeamSearch(TensorWrapper<T> *probs,
     int topK_ids_buf_size = bsxbm * BlockPerBeam * K;
     int final_topK_val_buf_size = bsxbm * K;
 
-    T* topK_vals_ptr = topk_vals->data;
-    int* topK_ids_ptr = topk_ids->data;
-    T* final_topK_vals_ptr = final_topk_vals->data;
-    int* final_topK_ids_ptr = final_topk_ids->data;
+    T* topK_vals_data = topk_vals->data;
+    int* topK_ids_data = topk_ids->data;
+    T* final_topK_vals_data = final_topk_vals->data;
+    int* final_topK_ids_data = final_topk_ids->data;
 
-    int maxBlockNums = 1024;
+    int maxBlockNums = 1024; 
     int BlockNums1 = std::min(bsxbm * BlockPerBeam, maxBlockNums);
     int BlockNums2 = std::min(bsxbm, maxBlockNums);
     dim3 grid_round1(BlockNums1);
@@ -104,9 +104,9 @@ void launchTopKforBeamSearch(TensorWrapper<T> *probs,
     dim3 block_round2(256);
 
     topK_kernel_round1<T, K, 256, BlockPerBeam>
-                        <<<grid_round1, block_round1>>>(probs->data, vocab_size, topK_ids_ptr, topK_vals_ptr);
+                        <<<grid_round1, block_round1>>>(probs->data, vocab_size, topK_ids_data, topK_vals_data);
     topK_kernel_round2<T, K, 256, BlockPerBeam>
-                        <<<grid_round2, block_round2>>>(topK_ids_ptr, topK_vals_ptr, final_topK_ids_ptr, final_topK_vals_ptr);
+                        <<<grid_round2, block_round2>>>(topK_ids_data, topK_vals_data, final_topK_ids_data, final_topK_vals_data);
 }
 
 
