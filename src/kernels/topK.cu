@@ -9,9 +9,7 @@ template<typename T, int K>
 __device__ topK<T, K> reduce_functor(const topK<T, K>& a, const topK<T, K>& b) {
     topK<T, K> res = a;
     for(int i = 0; i < K; i++){
-         if (b.id[i] != -1) { 
-            res.insertHeap(b.val[i], b.id[i]);
-         }
+        res.insertHeap(b.val[i], b.id[i]);
     }
     return res;
 }
@@ -34,7 +32,7 @@ __global__ void topK_kernel_round1(const T* probs, const int vocab_size,
     for(int data_id = tid + block_lane * blockSize; data_id < vocab_size; data_id += BlockPerBeam * blockSize){
         int data_offset = data_id + row_id * vocab_size;
         T data = probs[data_offset];
-        thread_topK.insertHeap(data, data_id);
+        thread_topK.insertHeap(data, data_offset);
     }
 
     topK<T, K> block_topK = blockreduce(temp_storage).Reduce(thread_topK, reduce_functor<T, K>);
@@ -97,8 +95,9 @@ void launchTopKforBeamSearch(TensorWrapper<T> *probs,
     T* final_topK_vals_ptr = final_topk_vals->data;
     int* final_topK_ids_ptr = final_topk_ids->data;
 
-    int BlockNums1 = bsxbm * BlockPerBeam;
-    int BlockNums2 = bsxbm;
+    int maxBlockNums = 1024;
+    int BlockNums1 = std::min(bsxbm * BlockPerBeam, maxBlockNums);
+    int BlockNums2 = std::min(bsxbm, maxBlockNums);
     dim3 grid_round1(BlockNums1);
     dim3 block_round1(256);
     dim3 grid_round2(BlockNums2);
