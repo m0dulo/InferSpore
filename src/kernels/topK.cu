@@ -32,7 +32,7 @@ __global__ void topK_kernel_round1(const T* probs, const int vocab_size,
     for(int data_id = tid + block_lane * blockSize; data_id < vocab_size; data_id += BlockPerBeam * blockSize){
         int data_offset = data_id + row_id * vocab_size;
         T data = probs[data_offset];
-        thread_topK.insertHeap(data, data_offset);
+        thread_topK.insertHeap(data, data_id);
     }
 
     topK<T, K> block_topK = blockreduce(temp_storage).Reduce(thread_topK, reduce_functor<T, K>);
@@ -83,7 +83,7 @@ void launchTopKforBeamSearch(TensorWrapper<T> *probs,
     int bsxbm = probs->shape[0];
     int vocab_size = probs->shape[1];
     constexpr int BlockPerBeam = 8;
-    constexpr int beamwidth = 1;
+    constexpr int beamwidth = 1; 
     constexpr int K = 5;
 
     int topK_val_buf_size = bsxbm * BlockPerBeam * K;
@@ -95,7 +95,7 @@ void launchTopKforBeamSearch(TensorWrapper<T> *probs,
     T* final_topK_vals_data = final_topk_vals->data;
     int* final_topK_ids_data = final_topk_ids->data;
 
-    int maxBlockNums = 1024; 
+    int maxBlockNums = 1024;
     int BlockNums1 = std::min(bsxbm * BlockPerBeam, maxBlockNums);
     int BlockNums2 = std::min(bsxbm, maxBlockNums);
     dim3 grid_round1(BlockNums1);
@@ -115,3 +115,9 @@ template void launchTopKforBeamSearch(TensorWrapper<float> *probs,
                              TensorWrapper<float> *topk_vals,
                              TensorWrapper<int> *final_topk_ids,
                              TensorWrapper<float> *final_topk_vals);
+
+template void launchTopKforBeamSearch(TensorWrapper<half> *probs,
+                             TensorWrapper<int> *topk_ids,
+                             TensorWrapper<half> *topk_vals,
+                             TensorWrapper<int> *final_topk_ids,
+                             TensorWrapper<half> *final_topk_vals);
