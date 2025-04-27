@@ -39,8 +39,8 @@ __global__ void topK_kernel_round1(const T* probs, const int vocab_size,
 
     if(tid == 0){
         for(int k_offset = 0; k_offset < K; k_offset++) {
-            topK_vals[row_id * vocab_size + block_lane * blockSize + k_offset] = block_topK.val[k_offset];
-            topK_ids[row_id * vocab_size + block_lane * K + k_offset] = block_topK.id[k_offset];
+            topK_vals[row_id * BlockPerBeam * K + block_lane * K + k_offset] = block_topK.val[k_offset];
+            topK_ids[row_id * BlockPerBeam * K  + block_lane * K + k_offset] = block_topK.id[k_offset];
         }
     }
 }
@@ -83,7 +83,7 @@ void launchTopKforBeamSearch(TensorWrapper<T> *probs,
     int bsxbm = probs->shape[0];
     int vocab_size = probs->shape[1];
     constexpr int BlockPerBeam = 8;
-    constexpr int beamwidth = 1; 
+    constexpr int beamwidth = 1;
     constexpr int K = 5;
 
     int topK_val_buf_size = bsxbm * BlockPerBeam * K;
@@ -95,7 +95,7 @@ void launchTopKforBeamSearch(TensorWrapper<T> *probs,
     T* final_topK_vals_data = final_topk_vals->data;
     int* final_topK_ids_data = final_topk_ids->data;
 
-    int maxBlockNums = 1024;
+    int maxBlockNums = 1024; 
     int BlockNums1 = std::min(bsxbm * BlockPerBeam, maxBlockNums);
     int BlockNums2 = std::min(bsxbm, maxBlockNums);
     dim3 grid_round1(BlockNums1);
