@@ -24,7 +24,7 @@ void CPUMaskedAttn(T *q,
     int head_stride = head_size;
     int cache_offset = batch_size * batch_stride;
     int block_nums = batch_size * num_heads;
-    float scale = 1 / sqrtf(float(head_size));
+    float scale = rsqrt(float(head_size));
 
     const T *q_mem = q;
     const T *k_mem = k;
