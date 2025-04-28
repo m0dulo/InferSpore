@@ -95,3 +95,21 @@ target_link_libraries(
     -lcudart
     -lcudadevrt
     act) 
+
+add_executable(test_topk
+    test_topk.cu
+)
+target_link_libraries(  
+    test_topk PUBLIC
+    -lcudart
+    -lcudadevrt
+    topk) 
+
+add_executable(test_fused_decoder_attention
+    test_fused_decoder_attention.cu
+)
+target_link_libraries(  
+    test_fused_decoder_attention PUBLIC
+    -lcudart
+    -lcudadevrt
+    fused_decoder_self_attention)
