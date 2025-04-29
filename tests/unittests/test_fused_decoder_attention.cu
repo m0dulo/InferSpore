@@ -46,31 +46,31 @@ void CPUMaskedAttn(T *q,
                 for (int tid = 0; tid < head_size; tid++)
                 {
                     int qkv_offset = batch_id * batch_stride + head_id * head_stride + tid;
-                    sk[tid] = (float)k_cache[iter * cache_offset + qkv_offset];
+                    sk[qkv_offset] = (float)k_cache[iter * cache_offset + qkv_offset];
                     if (iter == step - 1)
                     {
                         k_cache[iter * cache_offset + qkv_offset] = k_mem[qkv_offset];
-                        sk[tid] = (float)k_mem[qkv_offset];
+                        sk[qkv_offset] = (float)k_mem[qkv_offset];
                     }
 
-                    sq[tid] = (float)q_mem[qkv_offset];
-                    float qk = sq[tid] * sk[tid] * scale;
+                    sq[qkv_offset] = (float)q_mem[qkv_offset];
+                    float qk = sq[qkv_offset] * sk[qkv_offset] * scale;
                     attn_score += qk;
                 }
-                logits[iter] = attn_score;
+                logits[batch_id * num_heads * step + head_id * step + iter] = attn_score;
                 row_max = std::max(attn_score, row_max);
             }
             
             float fenmu = 0.0f;
             for (int iter = 0; iter < step; iter++)
             {
-                float fenzi = expf(logits[iter] - row_max);
+                float fenzi = expf(logits[batch_id * num_heads * step + head_id * step + iter] - row_max);
                 fenmu += fenzi;
-                logits[iter] = fenzi;
+                logits[batch_id * num_heads * step + head_id * step + iter] = fenzi;
             }
             for (int iter = 0; iter < step; iter++)
             {
-                logits[iter] = logits[iter] / fenmu;
+                logits[batch_id * num_heads * step + head_id * step + iter] = logits[batch_id * num_heads * step + head_id * step + iter] / fenmu;
             }
             
             for (int tid = 0; tid < head_size; tid++)
@@ -79,13 +79,13 @@ void CPUMaskedAttn(T *q,
                 int qkv_offset = batch_id * batch_stride + head_id * head_stride + tid;
                 for (int iter = 0; iter < step; iter++)
                 {
-                    sv[tid] = (float)v_cache[iter * cache_offset + qkv_offset];
+                    sv[qkv_offset] = (float)v_cache[iter * cache_offset + qkv_offset];
                     if (iter == step - 1)
                     {
                         v_cache[iter * cache_offset + qkv_offset] = v_mem[qkv_offset];
-                        sv[tid] = (float)v_mem[qkv_offset];
+                        sv[qkv_offset] = (float)v_mem[qkv_offset];
                     }
-                    O += sv[tid] * logits[iter];
+                    O += sv[qkv_offset] * logits[batch_id * num_heads * step + head_id * step + iter];
                 }
                 mha_output[qkv_offset] = O;
             }

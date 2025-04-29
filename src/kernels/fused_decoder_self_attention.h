@@ -5,6 +5,7 @@
 #include "src/utils/tensor.h"
 #include "src/models/llama/llama_params.h"
 #include "src/weights/base_weights.h"
+#include "src/utils/vectorize_utils.h"
 
 template<typename T>
 void launchDecoderMaskedMHA(TensorWrapper<T>* qkv_buf,
