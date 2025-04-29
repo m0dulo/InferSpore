@@ -127,17 +127,17 @@ int main(int argc, char *argv[])
     float *d_qkv;                                                                                                                                 
     int qkv_size = batch_size * (2 * kv_num_heads + num_heads) * head_size;                                                                       
     h_qkv = (float *)malloc(sizeof(float) * qkv_size);                                                                                            
-    cudaMalloc((void **)&d_qkv, sizeof(float) * qkv_size);                                                                                        
+    CHECK_CUDA_ERROR(cudaMalloc((void **)&d_qkv, sizeof(float) * qkv_size));                                                                    
     float *h_kcache;                                                                                                                              
     float *d_kcache;                                                                                                                              
     int kcache_size = max_seq_len * batch_size * kv_num_heads * head_size;                                                                        
     h_kcache = (float *)malloc(sizeof(float) * kcache_size);                                                                                      
-    cudaMalloc((void **)&d_kcache, sizeof(float) * kcache_size);                                                                                  
+    CHECK_CUDA_ERROR(cudaMalloc((void **)&d_kcache, sizeof(float) * kcache_size));                                                              
     float *h_vcache;                                                                                                                              
     float *d_vcache;                                                                                                                              
     int vcache_size = max_seq_len * batch_size * kv_num_heads * head_size;                                                                        
     h_vcache = (float *)malloc(sizeof(float) * vcache_size);                                                                                      
-    cudaMalloc((void **)&d_vcache, sizeof(float) * vcache_size);                                                                                  
+    CHECK_CUDA_ERROR(cudaMalloc((void **)&d_vcache, sizeof(float) * vcache_size));                                                              
     for (int i = 0; i < qkv_size; i++)                                                                                                            
     {                                                                                                                                             
         if (i < batch_size * num_heads * head_size)                                                                                               
@@ -194,26 +194,26 @@ int main(int argc, char *argv[])
     float *d_o;                                                                                                                                  
     int o_size = batch_size * num_heads * head_size;                                                                                             
     h_o = (float *)malloc(sizeof(float) * o_size);                                                                                               
-    cudaMalloc((void **)&d_o, sizeof(float) * o_size);                                                                                           
+    CHECK_CUDA_ERROR(cudaMalloc((void **)&d_o, sizeof(float) * o_size));                                                                        
     bool *h_finished = (bool *)malloc(sizeof(bool) * batch_size);                                                                                
     bool *d_finished;                                                                                                                            
-    cudaMalloc((void **)&d_finished, sizeof(bool) * batch_size);                                                                                 
+    CHECK_CUDA_ERROR(cudaMalloc((void **)&d_finished, sizeof(bool) * batch_size));                                                              
     for (int i = 0; i < batch_size; i++)                                                                                                         
     {                                                                                                                                            
         h_finished[i] = static_cast<bool>(0);                                                                                                    
     }                                                                                                                                            
     float *h_qkv_bias = (float *)malloc(sizeof(float) * (2 * kv_num_heads + num_heads) * head_size);                                             
     float *d_qkv_bias;                                                                                                                           
-    cudaMalloc((void **)&d_qkv_bias, sizeof(float) * (2 * kv_num_heads + num_heads) * head_size);                                                
+    CHECK_CUDA_ERROR(cudaMalloc((void **)&d_qkv_bias, sizeof(float) * (2 * kv_num_heads + num_heads) * head_size));                            
     for (int i = 0; i < (2 * kv_num_heads + num_heads) * head_size; i++)                                                                         
     {                                                                                                                                            
         h_qkv_bias[i] = (float)0.0f;                                                                                                             
     }                                                                                                                                            
-    cudaMemcpy(d_qkv, h_qkv, sizeof(float) * batch_size * (2 * kv_num_heads + num_heads) * head_size, cudaMemcpyHostToDevice);                   
-    cudaMemcpy(d_qkv_bias, h_qkv_bias, sizeof(float) * (2 * kv_num_heads + num_heads) * head_size, cudaMemcpyHostToDevice);                      
-    cudaMemcpy(d_finished, h_finished, sizeof(bool) * batch_size, cudaMemcpyHostToDevice);                                                       
-    cudaMemcpy(d_kcache, h_kcache, sizeof(float) * kcache_size, cudaMemcpyHostToDevice);                                                         
-    cudaMemcpy(d_vcache, h_vcache, sizeof(float) * vcache_size, cudaMemcpyHostToDevice);                                                         
+    CHECK_CUDA_ERROR(cudaMemcpy(d_qkv, h_qkv, sizeof(float) * batch_size * (2 * kv_num_heads + num_heads) * head_size, cudaMemcpyHostToDevice));  
+    CHECK_CUDA_ERROR(cudaMemcpy(d_qkv_bias, h_qkv_bias, sizeof(float) * (2 * kv_num_heads + num_heads) * head_size, cudaMemcpyHostToDevice));     
+    CHECK_CUDA_ERROR(cudaMemcpy(d_finished, h_finished, sizeof(bool) * batch_size, cudaMemcpyHostToDevice));                                      
+    CHECK_CUDA_ERROR(cudaMemcpy(d_kcache, h_kcache, sizeof(float) * kcache_size, cudaMemcpyHostToDevice));                                        
+    CHECK_CUDA_ERROR(cudaMemcpy(d_vcache, h_vcache, sizeof(float) * vcache_size, cudaMemcpyHostToDevice));                                        
     DataType type = getTensorType<float>();                                                                                                      
     DataType type_bool = getTensorType<bool>();                                                                                                  
     DataType type_int = getTensorType<int>();                                                                                                    
@@ -232,7 +232,7 @@ int main(int argc, char *argv[])
     params.max_position_embeddings = max_position_embeddings;                                                                                    
     params.use_dynamic_ntk = false;                                                                                                              
     launchDecoderMaskedMHA(qkv, qkv_weight, layer_id, kcache, vcache, finished, step, mha_output, params);                                       
-    cudaMemcpy(h_o, d_o, sizeof(float) * o_size, cudaMemcpyDeviceToHost);                                                                 
+    CHECK_CUDA_ERROR(cudaMemcpy(h_o, d_o, sizeof(float) * o_size, cudaMemcpyDeviceToHost));                                                      
     float *CPU_output = (float *)malloc(sizeof(float) * o_size);                                                                                 
     CPUMaskedAttn<float>(h_q, h_k, h_v, h_kcache, h_vcache, CPU_output, batch_size, num_heads, head_size, h_step);                               
     bool is_true = CheckResult<float>(CPU_output, h_o, o_size);                                                                                  
@@ -250,9 +250,11 @@ int main(int argc, char *argv[])
     free(h_o);                                                                                                                                   
     free(CPU_output);                                                                                                                            
     free(h_finished);                                                                                                                            
-    cudaFree(d_finished);                                                                                                                        
-    cudaFree(d_qkv);                                                                                                                             
-    cudaFree(d_o);                                                                                                                               
-    cudaFree(d_kcache);                                                                                                                          
-    cudaFree(d_vcache);
+    free(h_qkv_bias);                                                                                                                            
+    CHECK_CUDA_ERROR(cudaFree(d_finished));                                                                                                      
+    CHECK_CUDA_ERROR(cudaFree(d_qkv));                                                                                                           
+    CHECK_CUDA_ERROR(cudaFree(d_o));                                                                                                             
+    CHECK_CUDA_ERROR(cudaFree(d_kcache));                                                                                                        
+    CHECK_CUDA_ERROR(cudaFree(d_vcache));                                                                                                        
+    CHECK_CUDA_ERROR(cudaFree(d_qkv_bias));
 }

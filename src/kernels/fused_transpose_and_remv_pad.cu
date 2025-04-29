@@ -3,6 +3,7 @@
 #include <math.h>
 #include "src/utils/cuda_debug_utils.cuh"
 #include "src/kernels/fused_decoder_self_attention.h"
+#include "src/utils/vectorize_utils.h"
 
 template<typename T>
 __device__ T warpReduceSum(T val){
@@ -66,6 +67,47 @@ inline __device__ float2 GetRoPEres(float data, float data_rotate, const float2 
     return rot_v;
 }
 
+inline __device__ half2 GetRoPEres(const half2 v, const float2 coef)
+{
+    float2 fv = __half22float2(v);
+    float2 rot_fv;
+    rot_fv.x = coef.x * fv.x - coef.y * fv.y;
+    rot_fv.y = coef.x * fv.y + coef.y * fv.x;
+    return __float22half2_rn(rot_fv);
+}
+
+inline __device__ void apply_RoPE(half2& q, half2& k, int tid, int rot_embed_dim, float base, float t_step)
+{
+    if (2 * tid >= rot_embed_dim) {
+        return;
+    }
+    const auto coef = GetRoPEfreq(2 * tid, rot_embed_dim, base, t_step);
+    q = GetRoPEres(q, coef);
+    k = GetRoPEres(k, coef);
+}
+
+inline __device__ void apply_RoPE(float4& q, float4& k, int tid, int rot_embed_dim, float base, float t_step) {
+    if (4 * tid >= rot_embed_dim) {
+        return;
+    }
+    
+    float2 coef0 = GetRoPEfreq(4 * tid, rot_embed_dim, base, t_step);
+    float2 qres0 = GetRoPEres(q.x, q.y, coef0);
+    float2 kres0 = GetRoPEres(k.x, k.y, coef0);
+    q.x = qres0.x;
+    q.y = qres0.y;
+    k.x = kres0.x;
+    k.y = kres0.y;
+    
+    float2 coef1 = GetRoPEfreq(4 * tid + 2, rot_embed_dim, base, t_step);
+    float2 qres1 = GetRoPEres(q.z, q.w, coef1);
+    float2 kres1 = GetRoPEres(k.z, k.w, coef1);
+    q.z = qres1.x;
+    q.w = qres1.y;
+    k.z = kres1.x;
+    k.w = kres1.y;
+}
+
 template<typename T>
 __global__ void masked_MHA_kernel(T* q,
                     T* k,
@@ -93,35 +135,81 @@ __global__ void masked_MHA_kernel(T* q,
     int head_stride = head_size;
     int q_offset = q_batch_id * batch_stride + q_head_id * head_stride + tid;
     int k_offset = kv_batch_id * kv_batch_stride + kv_head_id * head_stride + tid;
-    int cache_offset = batch_size * kv_batch_stride;
+    int cache_offset = kv_batch_id * kv_head_num * max_seq_len * head_size +
+                        kv_head_id * max_seq_len * head_size + tid;
+    int step_stride = head_size;
     float scale = rsqrt(float(head_size));
 
-    extern __shared__ char sqk[];
-    T* sq = reinterpret_cast<T*>(sqk);
-    T* sk = sq + head_size;
-    float* logits = reinterpret_cast<float*>(sk + head_size);
+    int vec_size = Vec<T>::size;
+    int q_offset_vec = q_batch_id * batch_stride + q_head_id * head_stride + tid * vec_size;
+    int k_offset_vec = kv_batch_id * kv_batch_stride + kv_head_id * head_stride + tid * vec_size;
+    int cache_offset_vec = kv_batch_id * kv_head_num * max_seq_len * head_size +
+                        kv_head_id * max_seq_len * head_size + tid * vec_size;
 
-    sq[tid] = q[q_offset];
-    if (qkv_bias != nullptr){
-        sq[tid] += qkv_bias[q_head_id * head_size + tid];
+    using Vec_t = typename Vec<T>::Type;
+    Vec_t qvec, kvec, vvec;
+    const T* q_mem = q;
+    const T* k_mem = k;
+    const T* v_mem = v;
+    if (tid * vec_size < head_size) {
+        qvec = *reinterpret_cast<Vec_t*>(const_cast<T*>(&q_mem[q_offset_vec]));
+        if (qkv_bias != nullptr){
+            Vec_t q_bias = *reinterpret_cast<Vec_t*>(&qkv_bias[q_head_id * head_size + tid * vec_size]);
+            for(int i = 0; i < vec_size; i++) {
+                reinterpret_cast<float*>(&qvec)[i] += reinterpret_cast<float*>(&q_bias)[i];
+            }
+        }
+        kvec = *reinterpret_cast<Vec_t*>(const_cast<T*>(&k_mem[k_offset_vec]));        
+        if (qkv_bias != nullptr){
+            Vec_t k_bias = *reinterpret_cast<Vec_t*>(&qkv_bias[kv_head_id * head_size + tid * vec_size + head_num * head_size]);
+            for(int i = 0; i < vec_size; i++) {
+                reinterpret_cast<float*>(&kvec)[i] += reinterpret_cast<float*>(&k_bias)[i];
+            }
+        }
+        
+        apply_RoPE(qvec, kvec, tid, rotary_embedding_dim, rotary_embedding_base, step);
+        
+        vvec = *reinterpret_cast<Vec_t*>(const_cast<T*>(&v_mem[k_offset_vec]));
+        if (qkv_bias != nullptr){
+            Vec_t v_bias = *reinterpret_cast<Vec_t*>(&qkv_bias[kv_head_id * head_size + tid * vec_size + head_num * head_size + kv_head_num * head_size]);
+            for(int i = 0; i < vec_size; i++) {
+                reinterpret_cast<float*>(&vvec)[i] += reinterpret_cast<float*>(&v_bias)[i];
+            }
+        }
+    }
+    
+    extern __shared__ char sqk[];
+    T* sq_scalar = reinterpret_cast<T*>(sqk);
+    float* logits = reinterpret_cast<float*>(sq_scalar + head_size);
+    Vec_t* sq = reinterpret_cast<Vec_t*>(sq_scalar);
+    if (tid * vec_size < head_size) {
+        sq[tid] = qvec;
     }
     __syncthreads();
+    
+    float zero = 0.0f;
+    Vec_t zero_f4 = scalar_cast_vec<Vec_t, T>(zero);
+    float4 scale_f4 = scalar_cast_vec<float4, float>(scale);
 
     for(int iter = 0; iter < step; iter++) {
-        sk[tid] = k_cache[iter * cache_offset + k_offset];
-        if (iter == step - 1) {
-            sk[tid] = k[k_offset];
-            k_cache[iter * cache_offset + k_offset] = k[k_offset];
+        Vec_t kvec_qk = tid * vec_size < head_size ? *reinterpret_cast<Vec_t*>(&k_cache[iter * step_stride + cache_offset_vec]) : zero_f4;
+        if (iter == step - 1 && tid * vec_size < head_size) {
+            *reinterpret_cast<Vec_t*>(&k_cache[iter * step_stride + cache_offset_vec]) = kvec;
+            kvec_qk = kvec;
         }
-
-        T qk = sq[tid] * sk[tid] * scale;
-        T attn_score = blockReduceSum<T>(qk);
+        Vec_t qk = zero_f4;
+        qk.x = (tid * vec_size < head_size) ? sq[tid].x * kvec_qk.x * scale_f4.x : zero;
+        qk.y = (tid * vec_size < head_size) ? sq[tid].y * kvec_qk.y * scale_f4.y : zero;
+        qk.z = (tid * vec_size < head_size) ? sq[tid].z * kvec_qk.z * scale_f4.z : zero;
+        qk.w = (tid * vec_size < head_size) ? sq[tid].w * kvec_qk.w * scale_f4.w : zero;
+        T qk_acc = qk.x + qk.y + qk.z + qk.w;
+        T attn_score = blockReduceSum<T>(qk_acc);
         if(tid == 0) {
             logits[iter] = attn_score;
         }
         __syncthreads();
     }
-
+    
     T local_logits = tid < step ? (T)logits[tid] : 0;
     __shared__ float row_max, fenmu;
     
@@ -142,16 +230,21 @@ __global__ void masked_MHA_kernel(T* q,
     }
     __syncthreads();
 
-    T O = 0.0f;
-    for(int iter = 0; iter < step; iter++) {
-        T value = v_cache[iter * cache_offset + k_offset];
-        if (iter == step - 1) {
-            value = v[k_offset];
-            v_cache[iter * cache_offset + k_offset] = v[k_offset];
+    if (tid * vec_size < head_size) {
+        Vec_t O = scalar_cast_vec<Vec_t, T>(0.0f);
+        for(int iter = 0; iter < step; iter++) {
+            Vec_t vvec_qkv = *reinterpret_cast<Vec_t*>(&v_cache[iter * step_stride + cache_offset_vec]);
+            if (iter == step - 1) {
+                *reinterpret_cast<Vec_t*>(&v_cache[iter * step_stride + cache_offset_vec]) = vvec;
+                vvec_qkv = vvec;
+            }
+            O.x += vvec_qkv.x * logits[iter];
+            O.y += vvec_qkv.y * logits[iter];
+            O.z += vvec_qkv.z * logits[iter];
+            O.w += vvec_qkv.w * logits[iter];
         }
-        O += value * logits[iter];
+        *reinterpret_cast<Vec_t*>(&mha_output[q_offset_vec]) = O;
     }
-    mha_output[q_offset] = O;
 }
 
 template<>
@@ -181,36 +274,73 @@ __global__ void masked_MHA_kernel(half* q,
     int head_stride = head_size;
     int q_offset = q_batch_id * batch_stride + q_head_id * head_stride + tid;
     int k_offset = kv_batch_id * kv_batch_stride + kv_head_id * head_stride + tid;
-    int cache_offset = batch_size * kv_batch_stride;
+    int cache_offset = kv_batch_id * kv_head_num * max_seq_len * head_size +
+                        kv_head_id * max_seq_len * head_size + tid;
+    int step_stride = head_size;
     half scale = __float2half(rsqrt(float(head_size)));
  
+    int vec_size = Vec<half>::size;
+    int q_offset_vec = q_batch_id * batch_stride + q_head_id * head_stride + tid * vec_size;
+    int k_offset_vec = kv_batch_id * kv_batch_stride + kv_head_id * head_stride + tid * vec_size;
+    int cache_offset_vec = kv_batch_id * kv_head_num * max_seq_len * head_size +
+                        kv_head_id * max_seq_len * head_size + tid * vec_size;
+
+    using Vec_t = typename Vec<half>::Type;
+    Vec_t qvec, kvec, vvec;
+    Vec_t scale_vec = scalar_cast_vec<Vec_t, half>(scale);
+    const half* q_mem = q;
+    const half* k_mem = k;
+    const half* v_mem = v;
+    if (tid * vec_size < head_size) {
+        qvec = *reinterpret_cast<Vec_t*>(const_cast<half*>(&q_mem[q_offset_vec]));
+        if (qkv_bias != nullptr){
+            Vec_t q_bias = *reinterpret_cast<Vec_t*>(&qkv_bias[q_head_id * head_size + tid * vec_size]);
+            qvec = __hadd2(qvec, q_bias);
+        }
+        kvec = *reinterpret_cast<Vec_t*>(const_cast<half*>(&k_mem[k_offset_vec]));
+        if (qkv_bias != nullptr){
+            Vec_t k_bias = *reinterpret_cast<Vec_t*>(&qkv_bias[kv_head_id * head_size + tid * vec_size + head_num * head_size]);
+            kvec = __hadd2(kvec, k_bias);
+        }
+        
+        apply_RoPE(qvec, kvec, tid, rotary_embedding_dim, rotary_embedding_base, step);
+        
+        vvec = *reinterpret_cast<Vec_t*>(const_cast<half*>(&v_mem[k_offset_vec]));
+        if (qkv_bias != nullptr){
+            Vec_t v_bias = *reinterpret_cast<Vec_t*>(&qkv_bias[kv_head_id * head_size + tid * vec_size + head_num * head_size + kv_head_num * head_size]);
+            vvec = __hadd2(vvec, v_bias);
+        }
+    }
+    
     extern __shared__ char sqk[];
     half* sq = reinterpret_cast<half*>(sqk);
-    half* sk = sq + head_size;
-    float* logits = reinterpret_cast<float*>(sk + head_size);
-
-    sq[tid] = q[q_offset];
-    if (qkv_bias != nullptr){
-        sq[tid] = __hadd(sq[tid], qkv_bias[q_head_id * head_size + tid]);
+    float* logits = reinterpret_cast<float*>(sq + head_size);
+    Vec_t* sq_vec = reinterpret_cast<Vec_t*>(sq);
+    if (tid * vec_size < head_size) {
+        sq_vec[tid] = qvec;
     }
     __syncthreads();
+    
+    half zero = (half)0.0f;
+    Vec_t zero_h2 = scalar_cast_vec<Vec_t, half>(zero);
+    Vec_t scale_h2 = scalar_cast_vec<Vec_t, half>(scale);
 
     for(int iter = 0; iter < step; iter++) {
-        sk[tid] = k_cache[iter * cache_offset + k_offset];
-        if (iter == step - 1) {
-            sk[tid] = k[k_offset];
-            k_cache[iter * cache_offset + k_offset] = k[k_offset];
+        Vec_t kvec_qk = tid * vec_size < head_size ? *reinterpret_cast<Vec_t*>(&k_cache[iter * step_stride + cache_offset_vec]) : zero_h2;
+        if (iter == step - 1 && tid * vec_size < head_size) {
+            *reinterpret_cast<Vec_t*>(&k_cache[iter * step_stride + cache_offset_vec]) = kvec;
+            kvec_qk = kvec;         
         }
 
-        half qk = __hmul(__hmul(sq[tid], sk[tid]), scale);
-        float qk_fp32 = __half2float(qk);
+        Vec_t qk = (tid * vec_size < head_size) ? __hmul2(__hmul2(sq_vec[tid], kvec_qk), scale_h2) : zero_h2;
+        float qk_fp32 = __half2float(qk.x) + __half2float(qk.y);
         float attn_score = blockReduceSum<float>(qk_fp32);
         if(tid == 0) {
             logits[iter] = attn_score;
         }
         __syncthreads();
     }
-
+    
     float local_logits = tid < step ? logits[tid] : 0;
     __shared__ float row_max, fenmu;
     
@@ -231,16 +361,20 @@ __global__ void masked_MHA_kernel(half* q,
     }
     __syncthreads();
 
-    float O = 0.0f;
-    for(int iter = 0; iter < step; iter++) {
-        half value = v_cache[iter * cache_offset + k_offset];
-        if (iter == step - 1) {
-            value = v[k_offset];
-            v_cache[iter * cache_offset + k_offset] = v[k_offset];
+    if (tid * vec_size < head_size) {
+        float2 O = scalar_cast_vec<float2, float>(0.0f);
+        for(int iter = 0; iter < step; iter++) {
+            Vec_t vvec_qkv = *reinterpret_cast<Vec_t*>(&v_cache[iter * step_stride + cache_offset_vec]);
+            if (iter == step - 1) {
+                *reinterpret_cast<Vec_t*>(&v_cache[iter * step_stride + cache_offset_vec]) = vvec;
+                vvec_qkv = vvec;  
+            }
+            O.x += (logits[iter] * __half2float(vvec_qkv.x));
+            O.y += (logits[iter] * __half2float(vvec_qkv.y));
         }
-        O += __half2float(value) * logits[iter];
+        
+        *reinterpret_cast<Vec_t*>(&mha_output[q_offset_vec]) = __float22half2_rn(O);
     }
-    mha_output[q_offset] = __float2half(O);
 }
 
 template<typename T>
@@ -262,7 +396,7 @@ void launchDecoderMaskedMHA(TensorWrapper<T>* qkv_buf,
     const int cur_step = step->getVal();
     const int layer = layer_id->getVal();
     const int layer_offset = layer * max_seq_len * batch_size * kv_head_num * head_size;
-    size_t smem_size_bytes = 2 * head_size * sizeof(T) + cur_step * sizeof(float);
+    size_t smem_size_bytes = head_size * sizeof(T) + cur_step * sizeof(float);
     T* qkv_data = qkv_buf->data;
     T* q = qkv_data;
     T* k = qkv_data + head_num * head_size;
@@ -273,7 +407,8 @@ void launchDecoderMaskedMHA(TensorWrapper<T>* qkv_buf,
     int   max_position_embeddings = static_params.max_position_embeddings;
     bool  use_dynamic_ntk = static_params.use_dynamic_ntk;
     dim3 grid(head_num * batch_size);
-    dim3 block(head_size);
+    dim3 block(head_size / Vec<T>::size);
+    
     masked_MHA_kernel<T><<<grid, block, smem_size_bytes>>>(q,
                                                             k,
                                                             v,
@@ -289,6 +424,7 @@ void launchDecoderMaskedMHA(TensorWrapper<T>* qkv_buf,
                                                             cur_step,
                                                             rotary_embedding_dim,
                                                             rotary_embedding_base);
+    CHECK_CUDA_ERROR(cudaGetLastError());
 }
 
 template void launchDecoderMaskedMHA(TensorWrapper<float>* qkv_buf,
