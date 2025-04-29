@@ -67,6 +67,48 @@ inline __device__ float2 GetRoPEres(float data, float data_rotate, const float2 
     return rot_v;
 }
 
+inline __device__ half2 GetRoPEres(const half2 v, const float2 coef)
+{
+    float2 fv = __half22float2(v);
+    float2 rot_fv;
+    rot_fv.x = coef.x * fv.x - coef.y * fv.y;
+    rot_fv.y = coef.x * fv.y + coef.y * fv.x;
+    return __float22half2_rn(rot_fv);
+}
+
+inline __device__ void apply_RoPE(half2& q, half2& k, int tid, int rot_embed_dim, float base, float t_step)
+{
+    if (2 * tid >= rot_embed_dim) {
+        return;
+    }
+    const auto coef = GetRoPEfreq(2 * tid, rot_embed_dim, base, t_step);
+    q = GetRoPEres(q, coef);
+    k = GetRoPEres(k, coef);
+}
+
+inline __device__ void apply_RoPE(float4& q, float4& k, int tid, int rot_embed_dim, float base, float t_step) {
+    if (4 * tid >= rot_embed_dim) {
+        return;
+    }
+    
+    float2 coef0 = GetRoPEfreq(4 * tid, rot_embed_dim, base, t_step);
+    float2 qres0 = GetRoPEres(q.x, q.y, coef0);
+    float2 kres0 = GetRoPEres(k.x, k.y, coef0);
+    q.x = qres0.x;
+    q.y = qres0.y;
+    k.x = kres0.x;
+    k.y = kres0.y;
+    
+    // Apply to second half of vector
+    float2 coef1 = GetRoPEfreq(4 * tid + 2, rot_embed_dim, base, t_step);
+    float2 qres1 = GetRoPEres(q.z, q.w, coef1);
+    float2 kres1 = GetRoPEres(k.z, k.w, coef1);
+    q.z = qres1.x;
+    q.w = qres1.y;
+    k.z = kres1.x;
+    k.w = kres1.y;
+}
+
 template<typename T>
 __global__ void masked_MHA_kernel(T* q,
                     T* k,
@@ -110,8 +152,29 @@ __global__ void masked_MHA_kernel(T* q,
     const T* v_mem = v;
     if (tid * vec_size < head_size) {
         qvec = *reinterpret_cast<Vec_t*>(const_cast<T*>(&q_mem[q_offset_vec]));
+        if (qkv_bias != nullptr){
+            Vec_t q_bias = *reinterpret_cast<Vec_t*>(&qkv_bias[q_head_id * head_size + tid * vec_size]);
+            for(int i = 0; i < vec_size; i++) {
+                reinterpret_cast<float*>(&qvec)[i] += reinterpret_cast<float*>(&q_bias)[i];
+            }
+        }
         kvec = *reinterpret_cast<Vec_t*>(const_cast<T*>(&k_mem[k_offset_vec]));        
+        if (qkv_bias != nullptr){
+            Vec_t k_bias = *reinterpret_cast<Vec_t*>(&qkv_bias[kv_head_id * head_size + tid * vec_size + head_num * head_size]);
+            for(int i = 0; i < vec_size; i++) {
+                reinterpret_cast<float*>(&kvec)[i] += reinterpret_cast<float*>(&k_bias)[i];
+            }
+        }
+        
+        apply_RoPE(qvec, kvec, tid, rotary_embedding_dim, rotary_embedding_base, step);
+        
         vvec = *reinterpret_cast<Vec_t*>(const_cast<T*>(&v_mem[k_offset_vec]));
+        if (qkv_bias != nullptr){
+            Vec_t v_bias = *reinterpret_cast<Vec_t*>(&qkv_bias[kv_head_id * head_size + tid * vec_size + head_num * head_size + kv_head_num * head_size]);
+            for(int i = 0; i < vec_size; i++) {
+                reinterpret_cast<float*>(&vvec)[i] += reinterpret_cast<float*>(&v_bias)[i];
+            }
+        }
     }
     
     extern __shared__ char sqk[];
@@ -234,6 +297,9 @@ __global__ void masked_MHA_kernel(half* q,
             Vec_t k_bias = *reinterpret_cast<Vec_t*>(&qkv_bias[kv_head_id * head_size + tid * vec_size + head_num * head_size]);
             kvec = __hadd2(kvec, k_bias);
         }
+        
+        apply_RoPE(qvec, kvec, tid, rotary_embedding_dim, rotary_embedding_base, step);
+        
         vvec = *reinterpret_cast<Vec_t*>(const_cast<half*>(&v_mem[k_offset_vec]));
         if (qkv_bias != nullptr){
             Vec_t v_bias = *reinterpret_cast<Vec_t*>(&qkv_bias[kv_head_id * head_size + tid * vec_size + head_num * head_size + kv_head_num * head_size]);
