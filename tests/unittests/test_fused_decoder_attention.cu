@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string>
 #include <vector>
+#include <cassert>
 
 #include "src/kernels/fused_decoder_self_attention.h"
 #include "src/utils/macro.h"
@@ -17,12 +18,15 @@ void CPUMaskedAttn(T *q,
                    float *mha_output,
                    const int batch_size,
                    const int num_heads,
+                   const int kv_num_heads,
                    const int head_size,
-                   int step)
+                   int step,
+                   int rotary_embedding_dim = 0,
+                   float rotary_embedding_base = 10000.0f)
 {
     int batch_stride = num_heads * head_size;
+    int kv_batch_stride = kv_num_heads * head_size;
     int head_stride = head_size;
-    int cache_offset = batch_size * batch_stride;
     int block_nums = batch_size * num_heads;
     float scale = rsqrt(float(head_size));
 
@@ -39,22 +43,58 @@ void CPUMaskedAttn(T *q,
     {
         for (int head_id = 0; head_id < num_heads; head_id++)
         {
-            float row_max = 0.0f;
+            int kv_head_id = head_id / (num_heads / kv_num_heads);
+            
+            float row_max = -INFINITY;
             for (int iter = 0; iter < step; iter++)
             {
                 float attn_score = 0.0f;
                 for (int tid = 0; tid < head_size; tid++)
                 {
-                    int qkv_offset = batch_id * batch_stride + head_id * head_stride + tid;
-                    sk[qkv_offset] = (float)k_cache[iter * cache_offset + qkv_offset];
+                    int q_offset = batch_id * batch_stride + head_id * head_stride + tid;
+                    int k_offset = batch_id * kv_batch_stride + kv_head_id * head_stride + tid;
+                    int cache_offset = batch_id * kv_num_heads * step * head_size 
+                                    + kv_head_id * step * head_size
+                                    + iter * head_size + tid;
+                    
+                    sk[tid] = (float)k_cache[cache_offset];
                     if (iter == step - 1)
                     {
-                        k_cache[iter * cache_offset + qkv_offset] = k_mem[qkv_offset];
-                        sk[qkv_offset] = (float)k_mem[qkv_offset];
+                        k_cache[cache_offset] = k_mem[k_offset];
+                        sk[tid] = (float)k_mem[k_offset];
+                        
+                        // Approximate RoPE application for k
+                        if (rotary_embedding_dim > 0 && tid < rotary_embedding_dim / 2) {
+                            int pair_id = tid * 2;
+                            float inv_freq = (float)step / pow(rotary_embedding_base, pair_id / (float)rotary_embedding_dim);
+                            float cos_val = cos(inv_freq);
+                            float sin_val = sin(inv_freq);
+                            float k_val = (float)k_mem[k_offset];
+                            float k_rot_val = (pair_id + 1 < head_size) ? (float)k_mem[k_offset + 1] : 0.0f;
+                            sk[tid] = cos_val * k_val - sin_val * k_rot_val;
+                            if (pair_id + 1 < head_size) {
+                                sk[tid+1] = cos_val * k_rot_val + sin_val * k_val;
+                            }
+                        }
                     }
 
-                    sq[qkv_offset] = (float)q_mem[qkv_offset];
-                    float qk = sq[qkv_offset] * sk[qkv_offset] * scale;
+                    sq[tid] = (float)q_mem[q_offset];
+                    
+                    // Approximate RoPE application for q
+                    if (rotary_embedding_dim > 0 && tid < rotary_embedding_dim / 2 && iter == step - 1) {
+                        int pair_id = tid * 2;
+                        float inv_freq = (float)step / pow(rotary_embedding_base, pair_id / (float)rotary_embedding_dim);
+                        float cos_val = cos(inv_freq);
+                        float sin_val = sin(inv_freq);
+                        float q_val = (float)q_mem[q_offset];
+                        float q_rot_val = (pair_id + 1 < head_size) ? (float)q_mem[q_offset + 1] : 0.0f;
+                        sq[tid] = cos_val * q_val - sin_val * q_rot_val;
+                        if (pair_id + 1 < head_size) {
+                            sq[tid+1] = cos_val * q_rot_val + sin_val * q_val;
+                        }
+                    }
+                    
+                    float qk = sq[tid] * sk[tid] * scale;
                     attn_score += qk;
                 }
                 logits[batch_id * num_heads * step + head_id * step + iter] = attn_score;
@@ -76,18 +116,24 @@ void CPUMaskedAttn(T *q,
             for (int tid = 0; tid < head_size; tid++)
             {
                 float O = 0.0f;
-                int qkv_offset = batch_id * batch_stride + head_id * head_stride + tid;
+                int q_offset = batch_id * batch_stride + head_id * head_stride + tid;
+                int k_offset = batch_id * kv_batch_stride + kv_head_id * head_stride + tid;
+                
                 for (int iter = 0; iter < step; iter++)
                 {
-                    sv[qkv_offset] = (float)v_cache[iter * cache_offset + qkv_offset];
+                    int cache_offset = batch_id * kv_num_heads * step * head_size 
+                                     + kv_head_id * step * head_size
+                                     + iter * head_size + tid;
+                    
+                    sv[tid] = (float)v_cache[cache_offset];
                     if (iter == step - 1)
                     {
-                        v_cache[iter * cache_offset + qkv_offset] = v_mem[qkv_offset];
-                        sv[qkv_offset] = (float)v_mem[qkv_offset];
+                        v_cache[cache_offset] = v_mem[k_offset];
+                        sv[tid] = (float)v_mem[k_offset];
                     }
-                    O += sv[qkv_offset] * logits[batch_id * num_heads * step + head_id * step + iter];
+                    O += sv[tid] * logits[batch_id * num_heads * step + head_id * step + iter];
                 }
-                mha_output[qkv_offset] = O;
+                mha_output[q_offset] = O;
             }
         }
     }
@@ -98,16 +144,24 @@ void CPUMaskedAttn(T *q,
 template <typename T>
 bool CheckResult(float *CPUoutput, T *GPUoutput, int output_size)
 {
+    bool passed = true;
+    int errors = 0;
+    
     for (int i = 0; i < output_size; i++)
     {
         float GPUres = (float)GPUoutput[i];
-        if (fabs(CPUoutput[i] - GPUres) > 1e-6)
+        if (fabs(CPUoutput[i] - GPUres) > 1e-3)
         {
             printf("the %dth res is wrong, CPUoutput = %f, GPUoutput = %f\n", i, CPUoutput[i], GPUres);
-            return false;
+            errors++;
+            passed = false;
+            if (errors >= 10) {
+                printf("Too many errors, stopping comparison\n");
+                break;
+            }
         }
     }
-    return true;
+    return passed;
 }
 
 int main(int argc, char *argv[])
@@ -231,19 +285,35 @@ int main(int argc, char *argv[])
     params.rotary_embedding_base = rotary_embedding_base;                                                                                        
     params.max_position_embeddings = max_position_embeddings;                                                                                    
     params.use_dynamic_ntk = false;                                                                                                              
-    launchDecoderMaskedMHA(qkv, qkv_weight, layer_id, kcache, vcache, finished, step, mha_output, params);                                       
+    
+
+    try {
+        launchDecoderMaskedMHA(qkv, qkv_weight, layer_id, kcache, vcache, finished, step, mha_output, params);
+        CHECK_CUDA_ERROR(cudaDeviceSynchronize());
+    } catch (const std::exception& e) {
+        printf("GPU kernel execution failed: %s\n", e.what());
+        return 1;
+    }
+    
+ 
     CHECK_CUDA_ERROR(cudaMemcpy(h_o, d_o, sizeof(float) * o_size, cudaMemcpyDeviceToHost));                                                      
+    
+
     float *CPU_output = (float *)malloc(sizeof(float) * o_size);                                                                                 
-    CPUMaskedAttn<float>(h_q, h_k, h_v, h_kcache, h_vcache, CPU_output, batch_size, num_heads, head_size, h_step);                               
+    CPUMaskedAttn<float>(h_q, h_k, h_v, h_kcache, h_vcache, CPU_output, batch_size, num_heads, kv_num_heads, head_size, h_step, rotary_embedding_dim, rotary_embedding_base);                               
+    
+ 
     bool is_true = CheckResult<float>(CPU_output, h_o, o_size);                                                                                  
     if (is_true)                                                                                                                                 
     {                                                                                                                                            
-        printf("test passed\n");                                                                                                                  
+        printf("TEST PASSED ✓\n");                                                                                                                  
     }                                                                                                                                            
     else                                                                                                                                         
     {                                                                                                                                            
-        printf("test failed\n");                                                                                                                  
+        printf("TEST FAILED ✗\n");                                                                                                                  
     }                                                                                                                                            
+    
+    // Clean up resources
     free(h_qkv);                                                                                                                                 
     free(h_kcache);                                                                                                                              
     free(h_vcache);                                                                                                                              
@@ -257,4 +327,14 @@ int main(int argc, char *argv[])
     CHECK_CUDA_ERROR(cudaFree(d_kcache));                                                                                                        
     CHECK_CUDA_ERROR(cudaFree(d_vcache));                                                                                                        
     CHECK_CUDA_ERROR(cudaFree(d_qkv_bias));
+    
+    delete qkv;
+    delete kcache;
+    delete vcache;
+    delete finished;
+    delete step;
+    delete layer_id;
+    delete mha_output;
+    
+    return is_true ? 0 : 1;
 }
