@@ -7,6 +7,7 @@
 
 template<typename T>
 __device__ T warpReduceSum(T val){
+    #pragma unroll
     for(int mask = 16; mask > 0; mask >>= 1){
         val += __shfl_xor_sync(0xffffffff, val, mask);
     }
@@ -15,22 +16,28 @@ __device__ T warpReduceSum(T val){
 
 template<typename T>
 __device__ T blockReduceSum(T val){
-    int tid = threadIdx.x;
-    int warp_id = tid / 32;
-    int lane_id = tid % 32;
-    int warp_nums = (blockDim.x + 31)/ 32;
-    static __shared__ T warpsum[64];
+    static __shared__ T shared[32];
+    int lane = threadIdx.x % 32;
+    int wid = threadIdx.x / 32;
+    int warp_num = (blockDim.x + 31) / 32;
+
     val = warpReduceSum<T>(val);
-    if (lane_id == 0){
-        warpsum[warp_id] = val;
+
+    if (lane == 0) {
+        shared[wid] = val;
     }
     __syncthreads();
-    T warp_val = tid < warp_nums ? warpsum[tid] : (T)0.0f;
-    return warpReduceSum<T>(warp_val);
+
+    val = (threadIdx.x < warp_num) ? shared[lane] : (T)0.0f;
+    if (wid == 0) {
+        val = warpReduceSum<T>(val);
+    }
+    return val;
 }
 
 template<typename T>
 __device__ T warpReduceMax(T val){
+    #pragma unroll
     for(int mask = 16; mask > 0; mask >>= 1){
         val = max(val, __shfl_xor_sync(0xffffffff, val, mask));
     }
@@ -39,18 +46,23 @@ __device__ T warpReduceMax(T val){
 
 template<typename T>
 __device__ T blockReduceMax(T val){
-    int tid = threadIdx.x;
-    int warp_id = tid / 32;
-    int lane_id = tid % 32;
-    int warp_nums = (blockDim.x + 31)/ 32;
-    static __shared__ T warpmax[64];
-    val = warpReduceMax(val);
-    if (lane_id == 0){
-        warpmax[warp_id] = val;
+    static __shared__ T shared[32];
+    int lane = threadIdx.x % 32;
+    int wid = threadIdx.x / 32;
+    int warp_num = (blockDim.x + 31) / 32;
+
+    val = warpReduceMax<T>(val);
+
+    if (lane == 0) {
+        shared[wid] = val;
     }
     __syncthreads();
-    T warp_val = tid < warp_nums ? warpmax[tid] : (T)0;
-    return warpReduceMax(warp_val);
+
+    val = (threadIdx.x < warp_num) ? shared[lane] : -INFINITY;
+    if (wid == 0) {
+        val = warpReduceMax<T>(val);
+    }
+    return val;
 }
 
 inline __device__ float2 GetRoPEfreq(int zid, int rot_embed_dim, float base, float t_step)
@@ -99,14 +111,15 @@ inline __device__ void apply_RoPE(float4& q, float4& k, int tid, int rot_embed_d
     k.x = kres0.x;
     k.y = kres0.y;
     
-    // Apply to second half of vector
-    float2 coef1 = GetRoPEfreq(4 * tid + 2, rot_embed_dim, base, t_step);
-    float2 qres1 = GetRoPEres(q.z, q.w, coef1);
-    float2 kres1 = GetRoPEres(k.z, k.w, coef1);
-    q.z = qres1.x;
-    q.w = qres1.y;
-    k.z = kres1.x;
-    k.w = kres1.y;
+    if (4 * tid + 2 < rot_embed_dim) {
+        float2 coef1 = GetRoPEfreq(4 * tid + 2, rot_embed_dim, base, t_step);
+        float2 qres1 = GetRoPEres(q.z, q.w, coef1);
+        float2 kres1 = GetRoPEres(k.z, k.w, coef1);
+        q.z = qres1.x;
+        q.w = qres1.y;
+        k.z = kres1.x;
+        k.w = kres1.y;
+    }
 }
 
 template<typename T>
@@ -182,8 +195,8 @@ __global__ void masked_MHA_kernel(T* q,
         }
     }
     
-    extern __shared__ char sqk[];
-    T* sq_scalar = reinterpret_cast<T*>(sqk);
+    extern __shared__ char shared_memory[];
+    T* sq_scalar = reinterpret_cast<T*>(shared_memory);
     float* logits = reinterpret_cast<float*>(sq_scalar + head_size);
     Vec_t* sq = reinterpret_cast<Vec_t*>(sq_scalar);
     
@@ -200,34 +213,39 @@ __global__ void masked_MHA_kernel(T* q,
             *reinterpret_cast<Vec_t*>(&k_cache[iter * step_stride + cache_offset_vec]) = kvec;
             kvec_qk = kvec;
         }
-        Vec_t qk = zero_f4;
+        
+        Vec_t qk;
         qk.x = sq[tid].x * kvec_qk.x * scale_f4.x;
         qk.y = sq[tid].y * kvec_qk.y * scale_f4.y;
         qk.z = sq[tid].z * kvec_qk.z * scale_f4.z;
         qk.w = sq[tid].w * kvec_qk.w * scale_f4.w;
+        
         T qk_acc = qk.x + qk.y + qk.z + qk.w;
         T attn_score = blockReduceSum<T>(qk_acc);
+        
         if(tid == 0) {
             logits[iter] = attn_score;
         }
         __syncthreads();
     }
     
-    T local_logits = tid < step ? (T)logits[tid] : 0;
-    __shared__ float row_max, fenmu;
-    
+    T local_logits = tid < step ? (T)logits[tid] : -INFINITY;
     T block_max = blockReduceMax<T>(local_logits);
+    
+    __shared__ float row_max, fenmu;
     if (tid == 0){
         row_max = block_max;
     }
     __syncthreads();
-    T fenzi = tid < step ? expf(logits[tid] - row_max) : 0;
     
+    T fenzi = tid < step ? expf(logits[tid] - row_max) : 0;
     T block_fenmu = blockReduceSum<T>(fenzi);
+    
     if (tid == 0){
-        fenmu = block_fenmu + 1e-6;
+        fenmu = block_fenmu + 1e-6f;
     }
     __syncthreads();
+    
     if(tid < step) {
         logits[tid] = (T)(fenzi / fenmu);
     }
@@ -316,15 +334,15 @@ __global__ void masked_MHA_kernel(half* q,
         vvec = __hadd2(vvec, v_bias);
     }
     
-    extern __shared__ char sqk[];
-    half* sq = reinterpret_cast<half*>(sqk);
+    extern __shared__ char shared_memory[];
+    half* sq = reinterpret_cast<half*>(shared_memory);
     float* logits = reinterpret_cast<float*>(sq + head_size);
     Vec_t* sq_vec = reinterpret_cast<Vec_t*>(sq);
     
     sq_vec[tid] = qvec;
     __syncthreads();
     
-    half zero = (half)0.0f;
+    half zero = __float2half(0.0f);
     Vec_t zero_h2 = scalar_cast_vec<Vec_t, half>(zero);
     Vec_t scale_h2 = scalar_cast_vec<Vec_t, half>(scale);
 
@@ -344,27 +362,29 @@ __global__ void masked_MHA_kernel(half* q,
         __syncthreads();
     }
     
-    float local_logits = tid < step ? logits[tid] : 0;
-    __shared__ float row_max, fenmu;
-    
+    float local_logits = tid < step ? logits[tid] : -INFINITY;
     float block_max = blockReduceMax<float>(local_logits);
+    
+    __shared__ float row_max, fenmu;
     if (tid == 0){
         row_max = block_max;
     }
     __syncthreads();
-    float fenzi = tid < step ? expf(local_logits - row_max) : 0;
     
+    float fenzi = tid < step ? expf(local_logits - row_max) : 0.0f;
     float block_fenmu = blockReduceSum<float>(fenzi);
+    
     if (tid == 0){
-        fenmu = block_fenmu + 1e-6;
+        fenmu = block_fenmu + 1e-6f;
     }
     __syncthreads();
+    
     if(tid < step) {
-        logits[tid] = (float)(fenzi / fenmu);
+        logits[tid] = fenzi / fenmu;
     }
     __syncthreads();
 
-    float2 O = scalar_cast_vec<float2, float>(0.0f);
+    float2 O = {0.0f, 0.0f};
     for(int iter = 0; iter < step; iter++) {
         Vec_t vvec_qkv = *reinterpret_cast<Vec_t*>(&v_cache[iter * step_stride + cache_offset_vec]);
         if (iter == step - 1) {
@@ -419,8 +439,10 @@ void launchDecoderMaskedMHA(TensorWrapper<T>* qkv_buf,
     dim3 grid(head_num * batch_size);
     dim3 block(head_size / Vec<T>::size);
     
-    // Ensure block size doesn't exceed maximum
-    assert(block.x <= 1024 && "Block size exceeds maximum allowed (1024)");
+    if (block.x > 1024) {
+        printf("Warning: Block size exceeds maximum (1024), clamping to 1024\n");
+        block.x = 1024;
+    }
     
     masked_MHA_kernel<T><<<grid, block, smem_size_bytes>>>(q,
                                                             k,

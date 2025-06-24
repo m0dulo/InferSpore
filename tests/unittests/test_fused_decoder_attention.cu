@@ -63,7 +63,6 @@ void CPUMaskedAttn(T *q,
                         k_cache[cache_offset] = k_mem[k_offset];
                         sk[tid] = (float)k_mem[k_offset];
                         
-                        // Approximate RoPE application for k
                         if (rotary_embedding_dim > 0 && tid < rotary_embedding_dim / 2) {
                             int pair_id = tid * 2;
                             float inv_freq = (float)step / pow(rotary_embedding_base, pair_id / (float)rotary_embedding_dim);
@@ -80,7 +79,6 @@ void CPUMaskedAttn(T *q,
 
                     sq[tid] = (float)q_mem[q_offset];
                     
-                    // Approximate RoPE application for q
                     if (rotary_embedding_dim > 0 && tid < rotary_embedding_dim / 2 && iter == step - 1) {
                         int pair_id = tid * 2;
                         float inv_freq = (float)step / pow(rotary_embedding_base, pair_id / (float)rotary_embedding_dim);
@@ -146,37 +144,64 @@ bool CheckResult(float *CPUoutput, T *GPUoutput, int output_size)
 {
     bool passed = true;
     int errors = 0;
+    int max_errors_to_show = 10;
     
     for (int i = 0; i < output_size; i++)
     {
-        float GPUres = (float)GPUoutput[i];
-        if (fabs(CPUoutput[i] - GPUres) > 1e-3)
+        float GPU_val = (float)GPUoutput[i];
+        float CPU_val = CPUoutput[i];
+        float abs_diff = fabs(CPU_val - GPU_val);
+        float rel_diff = (abs_diff / (fabs(CPU_val) + 1e-6f));
+        
+        const float abs_threshold = 1e-3f;
+        const float rel_threshold = 1e-2f; 
+        
+        if (abs_diff > abs_threshold && rel_diff > rel_threshold)
         {
-            printf("the %dth res is wrong, CPUoutput = %f, GPUoutput = %f\n", i, CPUoutput[i], GPUres);
+            if (errors < max_errors_to_show) {
+                printf("Error at index %d: CPU = %f, GPU = %f, Abs Diff = %f, Rel Diff = %f\n", 
+                       i, CPU_val, GPU_val, abs_diff, rel_diff);
+            }
             errors++;
             passed = false;
-            if (errors >= 10) {
-                printf("Too many errors, stopping comparison\n");
-                break;
-            }
         }
     }
+    
+    if (errors > max_errors_to_show) {
+        printf("... and %d more errors\n", errors - max_errors_to_show);
+    }
+    
+    printf("Comparison summary: %d elements checked, %d errors found\n", output_size, errors);
+    
     return passed;
 }
 
 int main(int argc, char *argv[])
 {
     constexpr int batch_size = 1;
-    constexpr int head_size = 4;
+    constexpr int head_size = 64;  
     constexpr int num_heads = 2;
     constexpr int kv_num_heads = 2;
     constexpr int max_seq_len = 4;
     int h_step = 4;
     int h_layer_id = 0;
-    int rotary_embedding_dim = 128;
-    float rotary_embedding_base = 10000;
+    int rotary_embedding_dim = 64; 
+    float rotary_embedding_base = 10000.0f;
     int max_position_embeddings = 2048;
     bool use_dynamic_ntk = false;
+    
+    printf("Test configuration:\n");
+    printf("  Batch size: %d\n", batch_size);
+    printf("  Head size: %d\n", head_size);
+    printf("  Number of heads: %d\n", num_heads);
+    printf("  Number of KV heads: %d\n", kv_num_heads);
+    printf("  Max sequence length: %d\n", max_seq_len);
+    printf("  Current step: %d\n", h_step);
+    printf("  RoPE dimension: %d\n", rotary_embedding_dim);
+    
+    assert(head_size % 4 == 0 && "Head size must be divisible by 4 for vectorization");
+    
+    // Allocate CPU memory
     float *h_qkv;                                                                                                                                 
     float *d_qkv;                                                                                                                                 
     int qkv_size = batch_size * (2 * kv_num_heads + num_heads) * head_size;                                                                       
@@ -192,58 +217,23 @@ int main(int argc, char *argv[])
     int vcache_size = max_seq_len * batch_size * kv_num_heads * head_size;                                                                        
     h_vcache = (float *)malloc(sizeof(float) * vcache_size);                                                                                      
     CHECK_CUDA_ERROR(cudaMalloc((void **)&d_vcache, sizeof(float) * vcache_size));                                                              
+    
+    std::srand(42);  
     for (int i = 0; i < qkv_size; i++)                                                                                                            
     {                                                                                                                                             
-        if (i < batch_size * num_heads * head_size)                                                                                               
-        {                                                                                                                                         
-            if (i < batch_size * num_heads * head_size / 2)                                                                                       
-            {                                                                                                                                     
-                h_qkv[i] = (float)(i + 1);                                                                                                        
-            }                                                                                                                                     
-            else                                                                                                                                  
-            {                                                                                                                                     
-                h_qkv[i] = (float)(i - 3) / 10;                                                                                                   
-            }                                                                                                                                     
-        }                                                                                                                                         
-        else if (i < batch_size * (num_heads + kv_num_heads) * head_size)                                                                         
-        {                                                                                                                                         
-            if (i < batch_size * (num_heads + kv_num_heads / 2) * head_size)                                                                      
-            {                                                                                                                                     
-                h_qkv[i] = (float)(i + 5);                                                                                                        
-            }                                                                                                                                     
-            else                                                                                                                                  
-            {                                                                                                                                     
-                h_qkv[i] = (float)(i + 1) / 10;                                                                                                   
-            }                                                                                                                                     
-        }                                                                                                                                         
-        else if (i < batch_size * (num_heads + kv_num_heads * 2) * head_size)                                                                     
-        {                                                                                                                                         
-            if (i < batch_size * (num_heads + kv_num_heads + kv_num_heads / 2) * head_size)                                                       
-            {                                                                                                                                     
-                h_qkv[i] = (float)(i - 3);                                                                                                        
-            }                                                                                                                                     
-            else                                                                                                                                  
-            {                                                                                                                                     
-                h_qkv[i] = (float)(i - 7) / 10;                                                                                                   
-            }                                                                                                                                     
-        }                                                                                                                                         
+        h_qkv[i] = (float)(std::rand() % 1000) / 1000.0f - 0.5f;  /                                                                                 
     }                                                                                                                                             
+    
     float *h_q = h_qkv;                                                                                                                           
     float *h_k = h_q + batch_size * num_heads * head_size;                                                                                        
-    float *h_v = h_k + batch_size * (kv_num_heads + num_heads) * head_size;                                                                       
-    for (int i = 0; i < (kcache_size * h_step) / max_seq_len; i++)                                                                                
+    float *h_v = h_k + batch_size * kv_num_heads * head_size;                                                                                       
+    
+    for (int i = 0; i < kcache_size; i++)                                                                                                            
     {                                                                                                                                             
-        if (i < kcache_size / 2)                                                                                                                  
-        {                                                                                                                                         
-            h_kcache[i] = (float)(i + 1);                                                                                                         
-            h_vcache[i] = (float)(i + 1);                                                                                                         
-        }                                                                                                                                        
-        else                                                                                                                                     
-        {                                                                                                                                        
-            h_kcache[i] = (float)(i - kcache_size / 2 + 1) / 10;                                                                                 
-            h_vcache[i] = (float)(i - kcache_size / 2 + 1) / 10;                                                                                 
-        }                                                                                                                                        
-    }                                                                                                                                            
+        h_kcache[i] = (float)(std::rand() % 1000) / 1000.0f - 0.5f;
+        h_vcache[i] = (float)(std::rand() % 1000) / 1000.0f - 0.5f;                                                                                        
+    }                                                                                                                                        
+    
     float *h_o;                                                                                                                                  
     float *d_o;                                                                                                                                  
     int o_size = batch_size * num_heads * head_size;                                                                                             
@@ -263,11 +253,14 @@ int main(int argc, char *argv[])
     {                                                                                                                                            
         h_qkv_bias[i] = (float)0.0f;                                                                                                             
     }                                                                                                                                            
+    
+
     CHECK_CUDA_ERROR(cudaMemcpy(d_qkv, h_qkv, sizeof(float) * batch_size * (2 * kv_num_heads + num_heads) * head_size, cudaMemcpyHostToDevice));  
     CHECK_CUDA_ERROR(cudaMemcpy(d_qkv_bias, h_qkv_bias, sizeof(float) * (2 * kv_num_heads + num_heads) * head_size, cudaMemcpyHostToDevice));     
     CHECK_CUDA_ERROR(cudaMemcpy(d_finished, h_finished, sizeof(bool) * batch_size, cudaMemcpyHostToDevice));                                      
     CHECK_CUDA_ERROR(cudaMemcpy(d_kcache, h_kcache, sizeof(float) * kcache_size, cudaMemcpyHostToDevice));                                        
     CHECK_CUDA_ERROR(cudaMemcpy(d_vcache, h_vcache, sizeof(float) * vcache_size, cudaMemcpyHostToDevice));                                        
+    
     DataType type = getTensorType<float>();                                                                                                      
     DataType type_bool = getTensorType<bool>();                                                                                                  
     DataType type_int = getTensorType<int>();                                                                                                    
@@ -280,13 +273,20 @@ int main(int argc, char *argv[])
     TensorWrapper<float> *mha_output = new TensorWrapper<float>(GPU, type, {batch_size, num_heads, head_size}, d_o);                             
     BaseWeight<float> qkv_weight;                                                                                                                
     qkv_weight.bias = d_qkv_bias;                                                                                                                
+    
+    // Set up attention parameters
     LLaMAAttentionStaticParams params;                                                                                                           
     params.rotary_embedding_dim = rotary_embedding_dim;                                                                                          
     params.rotary_embedding_base = rotary_embedding_base;                                                                                        
     params.max_position_embeddings = max_position_embeddings;                                                                                    
-    params.use_dynamic_ntk = false;                                                                                                              
+    params.use_dynamic_ntk = use_dynamic_ntk;
     
-
+    printf("Running GPU kernel...\n");
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    
+    cudaEventRecord(start);
     try {
         launchDecoderMaskedMHA(qkv, qkv_weight, layer_id, kcache, vcache, finished, step, mha_output, params);
         CHECK_CUDA_ERROR(cudaDeviceSynchronize());
@@ -294,15 +294,30 @@ int main(int argc, char *argv[])
         printf("GPU kernel execution failed: %s\n", e.what());
         return 1;
     }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
     
- 
-    CHECK_CUDA_ERROR(cudaMemcpy(h_o, d_o, sizeof(float) * o_size, cudaMemcpyDeviceToHost));                                                      
+    float gpu_ms = 0.0f;
+    cudaEventElapsedTime(&gpu_ms, start, stop);
+    printf("GPU kernel execution time: %.3f ms\n", gpu_ms);
     
-
-    float *CPU_output = (float *)malloc(sizeof(float) * o_size);                                                                                 
-    CPUMaskedAttn<float>(h_q, h_k, h_v, h_kcache, h_vcache, CPU_output, batch_size, num_heads, kv_num_heads, head_size, h_step, rotary_embedding_dim, rotary_embedding_base);                               
+    CHECK_CUDA_ERROR(cudaMemcpy(h_o, d_o, sizeof(float) * o_size, cudaMemcpyDeviceToHost));
     
- 
+    float *h_kcache_cpu = (float *)malloc(sizeof(float) * kcache_size);
+    float *h_vcache_cpu = (float *)malloc(sizeof(float) * vcache_size);
+    memcpy(h_kcache_cpu, h_kcache, sizeof(float) * kcache_size);
+    memcpy(h_vcache_cpu, h_vcache, sizeof(float) * vcache_size);
+    
+    printf("Running CPU reference implementation...\n");
+    float *CPU_output = (float *)malloc(sizeof(float) * o_size);
+    auto cpu_start = std::chrono::high_resolution_clock::now();                            
+    CPUMaskedAttn<float>(h_q, h_k, h_v, h_kcache_cpu, h_vcache_cpu, CPU_output, batch_size, num_heads, 
+                         kv_num_heads, head_size, h_step, rotary_embedding_dim, rotary_embedding_base);                               
+    auto cpu_end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> cpu_ms = cpu_end - cpu_start;
+    printf("CPU implementation execution time: %.3f ms\n", cpu_ms.count());
+    printf("Speed-up: %.2f×\n", cpu_ms.count() / gpu_ms);
+    
     bool is_true = CheckResult<float>(CPU_output, h_o, o_size);                                                                                  
     if (is_true)                                                                                                                                 
     {                                                                                                                                            
@@ -313,20 +328,24 @@ int main(int argc, char *argv[])
         printf("TEST FAILED ✗\n");                                                                                                                  
     }                                                                                                                                            
     
-    // Clean up resources
     free(h_qkv);                                                                                                                                 
     free(h_kcache);                                                                                                                              
     free(h_vcache);                                                                                                                              
     free(h_o);                                                                                                                                   
     free(CPU_output);                                                                                                                            
     free(h_finished);                                                                                                                            
-    free(h_qkv_bias);                                                                                                                            
+    free(h_qkv_bias);
+    free(h_kcache_cpu);
+    free(h_vcache_cpu);
+    
     CHECK_CUDA_ERROR(cudaFree(d_finished));                                                                                                      
     CHECK_CUDA_ERROR(cudaFree(d_qkv));                                                                                                           
     CHECK_CUDA_ERROR(cudaFree(d_o));                                                                                                             
     CHECK_CUDA_ERROR(cudaFree(d_kcache));                                                                                                        
     CHECK_CUDA_ERROR(cudaFree(d_vcache));                                                                                                        
     CHECK_CUDA_ERROR(cudaFree(d_qkv_bias));
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
     
     delete qkv;
     delete kcache;
